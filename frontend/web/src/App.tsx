@@ -5,12 +5,13 @@ import { getContractReadOnly, getContractWithSigner } from "./components/useCont
 import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
+import { ethers } from 'ethers';
 
-interface CarbonTradeData {
+interface CarbonOrder {
   id: string;
   name: string;
-  carbonCredits: string;
-  price: string;
+  encryptedAmount: string;
+  price: number;
   timestamp: number;
   creator: string;
   publicValue1: number;
@@ -19,26 +20,36 @@ interface CarbonTradeData {
   decryptedValue?: number;
 }
 
+interface TradingStats {
+  totalOrders: number;
+  totalVolume: number;
+  avgPrice: number;
+  verifiedOrders: number;
+}
+
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
-  const [trades, setTrades] = useState<CarbonTradeData[]>([]);
+  const [orders, setOrders] = useState<CarbonOrder[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [creatingTrade, setCreatingTrade] = useState(false);
+  const [creatingOrder, setCreatingOrder] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ 
     visible: false, 
     status: "pending", 
     message: "" 
   });
-  const [newTradeData, setNewTradeData] = useState({ name: "", credits: "", price: "" });
-  const [selectedTrade, setSelectedTrade] = useState<CarbonTradeData | null>(null);
-  const [decryptedData, setDecryptedData] = useState<{ credits: number | null; price: number | null }>({ credits: null, price: null });
-  const [isDecrypting, setIsDecrypting] = useState(false);
-  const [contractAddress, setContractAddress] = useState("");
-  const [fhevmInitializing, setFhevmInitializing] = useState(false);
+  const [newOrderData, setNewOrderData] = useState({ name: "", amount: "", price: "" });
+  const [selectedOrder, setSelectedOrder] = useState<CarbonOrder | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [filterVerified, setFilterVerified] = useState(false);
+  const [userHistory, setUserHistory] = useState<CarbonOrder[]>([]);
+  const [partners] = useState([
+    { name: "Green Energy Corp", logo: "🌿" },
+    { name: "Eco Tech Ltd", logo: "🌱" },
+    { name: "Sustainable Solutions", logo: "🍃" },
+    { name: "Carbon Neutral Inc", logo: "🌳" }
+  ]);
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
@@ -46,25 +57,25 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected || isInitialized) return;
       
       try {
-        setFhevmInitializing(true);
+        console.log('Initializing FHEVM for carbon trading...');
         await initialize();
+        console.log('FHEVM initialized successfully');
       } catch (error) {
+        console.error('Failed to initialize FHEVM:', error);
         setTransactionStatus({ 
           visible: true, 
           status: "error", 
           message: "FHEVM initialization failed" 
         });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-      } finally {
-        setFhevmInitializing(false);
       }
     };
 
     initFhevmAfterConnection();
-  }, [isConnected, isInitialized, initialize, fhevmInitializing]);
+  }, [isConnected, isInitialized, initialize]);
 
   useEffect(() => {
     const loadDataAndContract = async () => {
@@ -74,9 +85,7 @@ const App: React.FC = () => {
       }
       
       try {
-        await loadData();
-        const contract = await getContractReadOnly();
-        if (contract) setContractAddress(await contract.getAddress());
+        await loadOrders();
       } catch (error) {
         console.error('Failed to load data:', error);
       } finally {
@@ -87,7 +96,14 @@ const App: React.FC = () => {
     loadDataAndContract();
   }, [isConnected]);
 
-  const loadData = async () => {
+  useEffect(() => {
+    if (address && orders.length > 0) {
+      const userOrders = orders.filter(order => order.creator.toLowerCase() === address.toLowerCase());
+      setUserHistory(userOrders);
+    }
+  }, [address, orders]);
+
+  const loadOrders = async () => {
     if (!isConnected) return;
     
     setIsRefreshing(true);
@@ -96,16 +112,16 @@ const App: React.FC = () => {
       if (!contract) return;
       
       const businessIds = await contract.getAllBusinessIds();
-      const tradesList: CarbonTradeData[] = [];
+      const ordersList: CarbonOrder[] = [];
       
       for (const businessId of businessIds) {
         try {
           const businessData = await contract.getBusinessData(businessId);
-          tradesList.push({
+          ordersList.push({
             id: businessId,
             name: businessData.name,
-            carbonCredits: businessId,
-            price: businessId,
+            encryptedAmount: businessId,
+            price: Number(businessData.publicValue1) || 0,
             timestamp: Number(businessData.timestamp),
             creator: businessData.creator,
             publicValue1: Number(businessData.publicValue1) || 0,
@@ -118,63 +134,63 @@ const App: React.FC = () => {
         }
       }
       
-      setTrades(tradesList);
+      setOrders(ordersList);
     } catch (e) {
-      setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
+      setTransactionStatus({ visible: true, status: "error", message: "Failed to load orders" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
       setIsRefreshing(false); 
     }
   };
 
-  const createTrade = async () => {
+  const createOrder = async () => {
     if (!isConnected || !address) { 
       setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return; 
     }
     
-    setCreatingTrade(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Creating carbon trade with FHE..." });
+    setCreatingOrder(true);
+    setTransactionStatus({ visible: true, status: "pending", message: "Creating carbon order with FHE encryption..." });
     
     try {
       const contract = await getContractWithSigner();
       if (!contract) throw new Error("Failed to get contract with signer");
       
-      const creditsValue = parseInt(newTradeData.credits) || 0;
+      const amountValue = parseInt(newOrderData.amount) || 0;
       const businessId = `carbon-${Date.now()}`;
       
-      const encryptedResult = await encrypt(contractAddress, address, creditsValue);
+      const encryptedResult = await encrypt(await contract.getAddress(), address, amountValue);
       
       const tx = await contract.createBusinessData(
         businessId,
-        newTradeData.name,
+        newOrderData.name,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        parseInt(newTradeData.price) || 0,
+        parseInt(newOrderData.price) || 0,
         0,
-        "Carbon Credit Trade"
+        "Carbon Credit Order"
       );
       
       setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
       await tx.wait();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Carbon trade created successfully!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Carbon order created successfully!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
       
-      await loadData();
+      await loadOrders();
       setShowCreateModal(false);
-      setNewTradeData({ name: "", credits: "", price: "" });
+      setNewOrderData({ name: "", amount: "", price: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
-        ? "Transaction rejected by user" 
-        : "Submission failed: " + (e.message || "Unknown error");
+        ? "Transaction rejected" 
+        : "Creation failed: " + (e.message || "Unknown error");
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
-      setCreatingTrade(false); 
+      setCreatingOrder(false); 
     }
   };
 
@@ -185,7 +201,6 @@ const App: React.FC = () => {
       return null; 
     }
     
-    setIsDecrypting(true);
     try {
       const contractRead = await getContractReadOnly();
       if (!contractRead) return null;
@@ -197,7 +212,7 @@ const App: React.FC = () => {
         setTransactionStatus({ 
           visible: true, 
           status: "success", 
-          message: "Data already verified on-chain" 
+          message: "Carbon amount already verified" 
         });
         setTimeout(() => {
           setTransactionStatus({ visible: false, status: "pending", message: "" });
@@ -213,18 +228,18 @@ const App: React.FC = () => {
       
       const result = await verifyDecryption(
         [encryptedValueHandle],
-        contractAddress,
+        await contractRead.getAddress(),
         (abiEncodedClearValues: string, decryptionProof: string) => 
           contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Verifying carbon amount..." });
       
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
       
-      await loadData();
+      await loadOrders();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Data decrypted and verified successfully!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Carbon amount verified successfully!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
@@ -236,13 +251,13 @@ const App: React.FC = () => {
         setTransactionStatus({ 
           visible: true, 
           status: "success", 
-          message: "Data is already verified on-chain" 
+          message: "Carbon amount is already verified" 
         });
         setTimeout(() => {
           setTransactionStatus({ visible: false, status: "pending", message: "" });
         }, 2000);
         
-        await loadData();
+        await loadOrders();
         return null;
       }
       
@@ -253,71 +268,163 @@ const App: React.FC = () => {
       });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
-    } finally { 
-      setIsDecrypting(false); 
     }
   };
 
-  const callIsAvailable = async () => {
+  const checkAvailability = async () => {
     try {
-      const contract = await getContractWithSigner();
+      const contract = await getContractReadOnly();
       if (!contract) return;
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Checking availability..." });
-      const tx = await contract.isAvailable();
-      await tx.wait();
-      
-      setTransactionStatus({ visible: true, status: "success", message: "Contract is available!" });
-      setTimeout(() => {
-        setTransactionStatus({ visible: false, status: "pending", message: "" });
-      }, 2000);
-    } catch (e: any) {
+      const available = await contract.isAvailable();
+      if (available) {
+        setTransactionStatus({ visible: true, status: "success", message: "FHE system is available!" });
+        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      }
+    } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Availability check failed" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
-  const filteredTrades = trades.filter(trade => {
-    const matchesSearch = trade.name.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesFilter = !filterVerified || trade.isVerified;
+  const getTradingStats = (): TradingStats => {
+    const totalOrders = orders.length;
+    const verifiedOrders = orders.filter(o => o.isVerified).length;
+    const totalVolume = orders.reduce((sum, order) => {
+      const amount = order.isVerified ? (order.decryptedValue || 0) : 0;
+      return sum + (amount * order.price);
+    }, 0);
+    const avgPrice = orders.length > 0 ? orders.reduce((sum, order) => sum + order.price, 0) / orders.length : 0;
+
+    return { totalOrders, totalVolume, avgPrice, verifiedOrders };
+  };
+
+  const filteredOrders = orders.filter(order => {
+    const matchesSearch = order.name.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesFilter = !filterVerified || order.isVerified;
     return matchesSearch && matchesFilter;
   });
 
-  const stats = {
-    totalTrades: trades.length,
-    verifiedTrades: trades.filter(t => t.isVerified).length,
-    totalVolume: trades.reduce((sum, t) => sum + t.publicValue1, 0),
-    avgPrice: trades.length > 0 ? trades.reduce((sum, t) => sum + t.publicValue2, 0) / trades.length : 0
+  const renderTradingStats = () => {
+    const stats = getTradingStats();
+    
+    return (
+      <div className="stats-grid">
+        <div className="stat-card metal-card">
+          <div className="stat-icon">📊</div>
+          <div className="stat-content">
+            <h3>Total Orders</h3>
+            <div className="stat-value">{stats.totalOrders}</div>
+          </div>
+        </div>
+        
+        <div className="stat-card metal-card">
+          <div className="stat-icon">💰</div>
+          <div className="stat-content">
+            <h3>Trading Volume</h3>
+            <div className="stat-value">${stats.totalVolume.toLocaleString()}</div>
+          </div>
+        </div>
+        
+        <div className="stat-card metal-card">
+          <div className="stat-icon">⚡</div>
+          <div className="stat-content">
+            <h3>Verified Orders</h3>
+            <div className="stat-value">{stats.verifiedOrders}/{stats.totalOrders}</div>
+          </div>
+        </div>
+        
+        <div className="stat-card metal-card">
+          <div className="stat-icon">🌿</div>
+          <div className="stat-content">
+            <h3>Avg Price</h3>
+            <div className="stat-value">${stats.avgPrice.toFixed(1)}</div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderCarbonChart = (order: CarbonOrder) => {
+    const amount = order.isVerified ? (order.decryptedValue || 0) : 50;
+    const impact = Math.min(100, (amount * order.price) / 1000 * 100);
+    
+    return (
+      <div className="carbon-chart">
+        <div className="chart-header">
+          <h4>Carbon Impact Analysis</h4>
+        </div>
+        <div className="chart-bars">
+          <div className="chart-bar">
+            <div className="bar-label">Carbon Credits</div>
+            <div className="bar-container">
+              <div 
+                className="bar-fill green-fill" 
+                style={{ width: `${Math.min(100, amount)}%` }}
+              >
+                <span>{amount} tons</span>
+              </div>
+            </div>
+          </div>
+          <div className="chart-bar">
+            <div className="bar-label">Environmental Impact</div>
+            <div className="bar-container">
+              <div 
+                className="bar-fill blue-fill" 
+                style={{ width: `${impact}%` }}
+              >
+                <span>{impact.toFixed(1)}%</span>
+              </div>
+            </div>
+          </div>
+          <div className="chart-bar">
+            <div className="bar-label">Price per Ton</div>
+            <div className="bar-container">
+              <div 
+                className="bar-fill gold-fill" 
+                style={{ width: `${Math.min(100, order.price)}%` }}
+              >
+                <span>${order.price}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   if (!isConnected) {
     return (
       <div className="app-container">
         <header className="app-header">
-          <div className="logo">
-            <h1>🌿 Confidential Carbon Trading</h1>
+          <div className="logo-section">
+            <div className="logo">🌿</div>
+            <h1>Confidential Carbon Trading</h1>
           </div>
-          <div className="header-actions">
-            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
-          </div>
+          <ConnectButton />
         </header>
         
         <div className="connection-prompt">
-          <div className="connection-content">
-            <div className="connection-icon">🌿</div>
-            <h2>Connect Your Wallet to Access Carbon Market</h2>
-            <p>Private carbon credit trading with FHE encryption for enterprise data protection</p>
+          <div className="prompt-content metal-panel">
+            <h2>🔐 Connect Your Wallet</h2>
+            <p>Access encrypted carbon credit trading with FHE protection</p>
+            <div className="features-list">
+              <div className="feature-item">• Zero-knowledge order matching</div>
+              <div className="feature-item">• Encrypted carbon amount verification</div>
+              <div className="feature-item">• ESG compliance automation</div>
+            </div>
           </div>
         </div>
       </div>
     );
   }
 
-  if (!isInitialized || fhevmInitializing) {
+  if (!isInitialized) {
     return (
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
-        <p>Initializing FHE Encryption System...</p>
+        <h2>Initializing FHE System...</h2>
+        <p>Status: {status}</p>
       </div>
     );
   }
@@ -325,246 +432,279 @@ const App: React.FC = () => {
   if (loading) return (
     <div className="loading-screen">
       <div className="fhe-spinner"></div>
-      <p>Loading carbon trading platform...</p>
+      <h2>Loading Carbon Trading Platform</h2>
     </div>
   );
 
   return (
     <div className="app-container">
       <header className="app-header">
-        <div className="logo">
-          <h1>🌿 Confidential Carbon Trading</h1>
-          <p>FHE Protected Carbon Credit Marketplace</p>
+        <div className="logo-section">
+          <div className="logo">🌿</div>
+          <h1>Confidential Carbon Trading</h1>
         </div>
         
-        <div className="header-actions">
-          <button onClick={callIsAvailable} className="availability-btn">
-            Check Availability
+        <nav className="nav-controls">
+          <button className="nav-btn" onClick={checkAvailability}>
+            Check FHE Status
           </button>
-          <button onClick={() => setShowCreateModal(true)} className="create-btn">
-            + New Trade
+          <button 
+            className="nav-btn primary" 
+            onClick={() => setShowCreateModal(true)}
+          >
+            + New Carbon Order
           </button>
-          <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
-        </div>
+          <ConnectButton />
+        </nav>
       </header>
-      
-      <div className="main-content">
-        <div className="stats-panel">
-          <div className="stat-card">
-            <h3>Total Trades</h3>
-            <div className="stat-value">{stats.totalTrades}</div>
-          </div>
-          <div className="stat-card">
-            <h3>Verified</h3>
-            <div className="stat-value">{stats.verifiedTrades}</div>
-          </div>
-          <div className="stat-card">
-            <h3>Total Volume</h3>
-            <div className="stat-value">{stats.totalVolume}</div>
-          </div>
-          <div className="stat-card">
-            <h3>Avg Price</h3>
-            <div className="stat-value">${stats.avgPrice.toFixed(2)}</div>
-          </div>
-        </div>
 
-        <div className="search-filters">
-          <div className="search-box">
-            <input 
-              type="text" 
-              placeholder="Search carbon trades..." 
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-          </div>
-          <div className="filters">
-            <label>
-              <input 
-                type="checkbox" 
-                checked={filterVerified}
-                onChange={(e) => setFilterVerified(e.target.checked)}
-              />
-              Show Verified Only
-            </label>
-            <button onClick={loadData} className="refresh-btn">
-              Refresh
+      <main className="main-content">
+        <section className="dashboard-section">
+          <div className="section-header">
+            <h2>Carbon Market Dashboard</h2>
+            <button 
+              onClick={loadOrders} 
+              className="refresh-btn"
+              disabled={isRefreshing}
+            >
+              {isRefreshing ? "🔄" : "⟳"} Refresh
             </button>
           </div>
-        </div>
+          
+          {renderTradingStats()}
+        </section>
 
-        <div className="trades-list">
-          {filteredTrades.length === 0 ? (
-            <div className="no-trades">
-              <p>No carbon trades found</p>
-              <button onClick={() => setShowCreateModal(true)} className="create-btn">
-                Create First Trade
-              </button>
+        <section className="trading-section">
+          <div className="section-header">
+            <h2>Carbon Order Book</h2>
+            <div className="filters">
+              <input
+                type="text"
+                placeholder="Search orders..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="search-input"
+              />
+              <label className="filter-toggle">
+                <input
+                  type="checkbox"
+                  checked={filterVerified}
+                  onChange={(e) => setFilterVerified(e.target.checked)}
+                />
+                Verified Only
+              </label>
             </div>
-          ) : (
-            filteredTrades.map((trade, index) => (
-              <div 
-                className={`trade-item ${trade.isVerified ? "verified" : ""}`}
-                key={index}
-                onClick={() => setSelectedTrade(trade)}
-              >
-                <div className="trade-header">
-                  <h3>{trade.name}</h3>
-                  <span className={`status ${trade.isVerified ? "verified" : "pending"}`}>
-                    {trade.isVerified ? "✅ Verified" : "🔒 Encrypted"}
-                  </span>
-                </div>
-                <div className="trade-details">
-                  <div className="detail">
-                    <span>Price:</span>
-                    <strong>${trade.publicValue2}</strong>
-                  </div>
-                  <div className="detail">
-                    <span>Credits:</span>
-                    <strong>{trade.isVerified ? trade.decryptedValue : "🔒 FHE Encrypted"}</strong>
-                  </div>
-                  <div className="detail">
-                    <span>Creator:</span>
-                    <span>{trade.creator.substring(0, 8)}...</span>
-                  </div>
-                </div>
+          </div>
+
+          <div className="orders-grid">
+            {filteredOrders.length === 0 ? (
+              <div className="empty-state metal-panel">
+                <div className="empty-icon">🌱</div>
+                <h3>No Carbon Orders Found</h3>
+                <p>Create the first carbon credit trading order</p>
+                <button 
+                  className="create-btn"
+                  onClick={() => setShowCreateModal(true)}
+                >
+                  Create Carbon Order
+                </button>
               </div>
-            ))
-          )}
-        </div>
-      </div>
-      
+            ) : (
+              filteredOrders.map((order) => (
+                <div 
+                  key={order.id}
+                  className={`order-card metal-card ${order.isVerified ? 'verified' : ''}`}
+                  onClick={() => setSelectedOrder(order)}
+                >
+                  <div className="order-header">
+                    <h3>{order.name}</h3>
+                    <span className={`status-badge ${order.isVerified ? 'verified' : 'pending'}`}>
+                      {order.isVerified ? '✅ Verified' : '🔒 Encrypted'}
+                    </span>
+                  </div>
+                  
+                  <div className="order-details">
+                    <div className="detail-item">
+                      <span>Price:</span>
+                      <strong>${order.price}/ton</strong>
+                    </div>
+                    <div className="detail-item">
+                      <span>Carbon Amount:</span>
+                      <strong>
+                        {order.isVerified ? 
+                          `${order.decryptedValue} tons` : 
+                          '🔐 FHE Encrypted'
+                        }
+                      </strong>
+                    </div>
+                    <div className="detail-item">
+                      <span>Creator:</span>
+                      <span>{order.creator.substring(0, 8)}...</span>
+                    </div>
+                  </div>
+                  
+                  <div className="order-footer">
+                    <span>{new Date(order.timestamp * 1000).toLocaleDateString()}</span>
+                    <button className="view-btn">View Details</button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="user-section">
+          <div className="user-history metal-panel">
+            <h3>Your Trading History</h3>
+            {userHistory.length === 0 ? (
+              <p className="no-history">No trading history found</p>
+            ) : (
+              <div className="history-list">
+                {userHistory.slice(0, 5).map(order => (
+                  <div key={order.id} className="history-item">
+                    <span>{order.name}</span>
+                    <span>${order.price}</span>
+                    <span className={`status ${order.isVerified ? 'verified' : 'pending'}`}>
+                      {order.isVerified ? 'Verified' : 'Pending'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="partners-panel metal-panel">
+            <h3>ESG Partners</h3>
+            <div className="partners-grid">
+              {partners.map((partner, index) => (
+                <div key={index} className="partner-card">
+                  <div className="partner-logo">{partner.logo}</div>
+                  <span>{partner.name}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      </main>
+
       {showCreateModal && (
-        <ModalCreateTrade 
-          onSubmit={createTrade} 
-          onClose={() => setShowCreateModal(false)} 
-          creating={creatingTrade} 
-          tradeData={newTradeData} 
-          setTradeData={setNewTradeData}
+        <CreateOrderModal
+          onSubmit={createOrder}
+          onClose={() => setShowCreateModal(false)}
+          creating={creatingOrder}
+          orderData={newOrderData}
+          setOrderData={setNewOrderData}
           isEncrypting={isEncrypting}
         />
       )}
-      
-      {selectedTrade && (
-        <TradeDetailModal 
-          trade={selectedTrade} 
-          onClose={() => { 
-            setSelectedTrade(null); 
-            setDecryptedData({ credits: null, price: null }); 
-          }} 
-          decryptedData={decryptedData} 
-          setDecryptedData={setDecryptedData} 
-          isDecrypting={isDecrypting || fheIsDecrypting} 
-          decryptData={() => decryptData(selectedTrade.id)}
+
+      {selectedOrder && (
+        <OrderDetailModal
+          order={selectedOrder}
+          onClose={() => setSelectedOrder(null)}
+          onDecrypt={decryptData}
+          isDecrypting={fheIsDecrypting}
+          renderChart={renderCarbonChart}
         />
       )}
-      
+
       {transactionStatus.visible && (
-        <div className="transaction-modal">
-          <div className="transaction-content">
-            <div className={`transaction-icon ${transactionStatus.status}`}>
-              {transactionStatus.status === "pending" && <div className="fhe-spinner"></div>}
-              {transactionStatus.status === "success" && "✓"}
-              {transactionStatus.status === "error" && "✗"}
-            </div>
-            <div className="transaction-message">{transactionStatus.message}</div>
+        <div className={`transaction-toast ${transactionStatus.status}`}>
+          <div className="toast-content">
+            <span className="toast-icon">
+              {transactionStatus.status === "pending" && "⏳"}
+              {transactionStatus.status === "success" && "✅"}
+              {transactionStatus.status === "error" && "❌"}
+            </span>
+            {transactionStatus.message}
           </div>
         </div>
       )}
-
-      <footer className="app-footer">
-        <div className="footer-content">
-          <p>🌿 Confidential Carbon Trading Platform - FHE Protected Transactions</p>
-          <div className="footer-links">
-            <span>ESG Compliant</span>
-            <span>Privacy First</span>
-            <span>Enterprise Ready</span>
-          </div>
-        </div>
-      </footer>
     </div>
   );
 };
 
-const ModalCreateTrade: React.FC<{
-  onSubmit: () => void; 
-  onClose: () => void; 
+const CreateOrderModal: React.FC<{
+  onSubmit: () => void;
+  onClose: () => void;
   creating: boolean;
-  tradeData: any;
-  setTradeData: (data: any) => void;
+  orderData: any;
+  setOrderData: (data: any) => void;
   isEncrypting: boolean;
-}> = ({ onSubmit, onClose, creating, tradeData, setTradeData, isEncrypting }) => {
+}> = ({ onSubmit, onClose, creating, orderData, setOrderData, isEncrypting }) => {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
-    if (name === 'credits') {
+    if (name === 'amount') {
       const intValue = value.replace(/[^\d]/g, '');
-      setTradeData({ ...tradeData, [name]: intValue });
+      setOrderData({ ...orderData, [name]: intValue });
     } else {
-      setTradeData({ ...tradeData, [name]: value });
+      setOrderData({ ...orderData, [name]: value });
     }
   };
 
   return (
     <div className="modal-overlay">
-      <div className="create-trade-modal">
+      <div className="create-modal metal-panel">
         <div className="modal-header">
-          <h2>New Carbon Trade</h2>
-          <button onClick={onClose} className="close-modal">×</button>
+          <h2>Create Carbon Credit Order</h2>
+          <button onClick={onClose} className="close-btn">×</button>
         </div>
         
         <div className="modal-body">
           <div className="fhe-notice">
-            <strong>FHE 🔐 Carbon Credit Encryption</strong>
-            <p>Credit quantity encrypted with Zama FHE for privacy protection</p>
+            <div className="notice-icon">🔐</div>
+            <div>
+              <strong>FHE Encrypted Carbon Trading</strong>
+              <p>Carbon amount encrypted with Zama FHE for privacy protection</p>
+            </div>
           </div>
-          
+
           <div className="form-group">
-            <label>Project Name *</label>
-            <input 
-              type="text" 
-              name="name" 
-              value={tradeData.name} 
-              onChange={handleChange} 
-              placeholder="Enter project name..." 
+            <label>Order Name *</label>
+            <input
+              type="text"
+              name="name"
+              value={orderData.name}
+              onChange={handleChange}
+              placeholder="e.g., Corporate Carbon Offset 2024"
             />
           </div>
-          
+
           <div className="form-group">
-            <label>Carbon Credits (Integer only) *</label>
-            <input 
-              type="number" 
-              name="credits" 
-              value={tradeData.credits} 
-              onChange={handleChange} 
-              placeholder="Enter credit quantity..." 
-              step="1"
-              min="0"
+            <label>Carbon Amount (tons) *</label>
+            <input
+              type="number"
+              name="amount"
+              value={orderData.amount}
+              onChange={handleChange}
+              placeholder="Enter carbon credit amount"
+              min="1"
             />
-            <div className="data-type-label">FHE Encrypted Integer</div>
+            <span className="input-hint">FHE Encrypted Integer</span>
           </div>
-          
+
           <div className="form-group">
-            <label>Price per Credit ($) *</label>
-            <input 
-              type="number" 
-              name="price" 
-              value={tradeData.price} 
-              onChange={handleChange} 
-              placeholder="Enter price..." 
-              step="0.01"
-              min="0"
+            <label>Price per Ton ($) *</label>
+            <input
+              type="number"
+              name="price"
+              value={orderData.price}
+              onChange={handleChange}
+              placeholder="Enter price per carbon ton"
+              min="1"
             />
-            <div className="data-type-label">Public Data</div>
+            <span className="input-hint">Public Market Price</span>
           </div>
         </div>
-        
+
         <div className="modal-footer">
           <button onClick={onClose} className="cancel-btn">Cancel</button>
           <button 
-            onClick={onSubmit} 
-            disabled={creating || isEncrypting || !tradeData.name || !tradeData.credits || !tradeData.price} 
+            onClick={onSubmit}
+            disabled={creating || isEncrypting || !orderData.name || !orderData.amount || !orderData.price}
             className="submit-btn"
           >
-            {creating || isEncrypting ? "Encrypting and Creating..." : "Create Trade"}
+            {creating || isEncrypting ? "Encrypting..." : "Create Order"}
           </button>
         </div>
       </div>
@@ -572,111 +712,102 @@ const ModalCreateTrade: React.FC<{
   );
 };
 
-const TradeDetailModal: React.FC<{
-  trade: CarbonTradeData;
+const OrderDetailModal: React.FC<{
+  order: CarbonOrder;
   onClose: () => void;
-  decryptedData: { credits: number | null; price: number | null };
-  setDecryptedData: (value: { credits: number | null; price: number | null }) => void;
+  onDecrypt: (id: string) => Promise<number | null>;
   isDecrypting: boolean;
-  decryptData: () => Promise<number | null>;
-}> = ({ trade, onClose, decryptedData, setDecryptedData, isDecrypting, decryptData }) => {
+  renderChart: (order: CarbonOrder) => JSX.Element;
+}> = ({ order, onClose, onDecrypt, isDecrypting, renderChart }) => {
+  const [localDecrypted, setLocalDecrypted] = useState<number | null>(null);
+
   const handleDecrypt = async () => {
-    if (decryptedData.credits !== null) { 
-      setDecryptedData({ credits: null, price: null }); 
-      return; 
-    }
+    if (order.isVerified) return;
     
-    const decrypted = await decryptData();
-    if (decrypted !== null) {
-      setDecryptedData({ credits: decrypted, price: decrypted });
+    const result = await onDecrypt(order.id);
+    if (result !== null) {
+      setLocalDecrypted(result);
     }
   };
 
   return (
     <div className="modal-overlay">
-      <div className="trade-detail-modal">
+      <div className="detail-modal metal-panel">
         <div className="modal-header">
-          <h2>Carbon Trade Details</h2>
-          <button onClick={onClose} className="close-modal">×</button>
+          <h2>Carbon Order Details</h2>
+          <button onClick={onClose} className="close-btn">×</button>
         </div>
-        
+
         <div className="modal-body">
-          <div className="trade-info">
-            <div className="info-item">
-              <span>Project:</span>
-              <strong>{trade.name}</strong>
-            </div>
-            <div className="info-item">
-              <span>Creator:</span>
-              <strong>{trade.creator.substring(0, 8)}...{trade.creator.substring(38)}</strong>
-            </div>
-            <div className="info-item">
-              <span>Date:</span>
-              <strong>{new Date(trade.timestamp * 1000).toLocaleDateString()}</strong>
-            </div>
-            <div className="info-item">
-              <span>Price:</span>
-              <strong>${trade.publicValue2}</strong>
+          <div className="order-info">
+            <div className="info-grid">
+              <div className="info-item">
+                <label>Order Name</label>
+                <span>{order.name}</span>
+              </div>
+              <div className="info-item">
+                <label>Price per Ton</label>
+                <span>${order.price}</span>
+              </div>
+              <div className="info-item">
+                <label>Carbon Amount</label>
+                <span>
+                  {order.isVerified ? 
+                    `${order.decryptedValue} tons` : 
+                    localDecrypted ? 
+                    `${localDecrypted} tons (Decrypted)` : 
+                    "🔐 FHE Encrypted"
+                  }
+                </span>
+              </div>
+              <div className="info-item">
+                <label>Status</label>
+                <span className={`status ${order.isVerified ? 'verified' : 'encrypted'}`}>
+                  {order.isVerified ? '✅ On-chain Verified' : '🔒 Encrypted'}
+                </span>
+              </div>
             </div>
           </div>
-          
-          <div className="data-section">
-            <h3>Encrypted Carbon Credits</h3>
-            
-            <div className="data-row">
-              <div className="data-label">Credit Quantity:</div>
-              <div className="data-value">
-                {trade.isVerified && trade.decryptedValue ? 
-                  `${trade.decryptedValue} credits (Verified)` : 
-                  decryptedData.credits !== null ? 
-                  `${decryptedData.credits} credits (Decrypted)` : 
-                  "🔒 FHE Encrypted"
-                }
+
+          {renderChart(order)}
+
+          <div className="verification-section">
+            <h4>FHE Verification</h4>
+            <div className="verification-content">
+              <div className="fhe-process">
+                <div className="process-step">
+                  <span>1</span>
+                  <p>Carbon amount encrypted with Zama FHE</p>
+                </div>
+                <div className="process-step">
+                  <span>2</span>
+                  <p>Stored on-chain as encrypted data</p>
+                </div>
+                <div className="process-step">
+                  <span>3</span>
+                  <p>Client-side decryption with proof generation</p>
+                </div>
+                <div className="process-step">
+                  <span>4</span>
+                  <p>On-chain verification via FHE.checkSignatures</p>
+                </div>
               </div>
+              
               <button 
-                className={`decrypt-btn ${(trade.isVerified || decryptedData.credits !== null) ? 'decrypted' : ''}`}
-                onClick={handleDecrypt} 
-                disabled={isDecrypting}
+                className={`verify-btn ${order.isVerified ? 'verified' : ''}`}
+                onClick={handleDecrypt}
+                disabled={isDecrypting || order.isVerified}
               >
-                {isDecrypting ? "Decrypting..." : trade.isVerified ? "✅ Verified" : decryptedData.credits !== null ? "🔄 Re-verify" : "🔓 Decrypt"}
+                {isDecrypting ? "Verifying..." : 
+                 order.isVerified ? "✅ Verified" : 
+                 "🔓 Verify Carbon Amount"}
               </button>
             </div>
-            
-            <div className="fhe-info">
-              <div className="fhe-icon">🔐</div>
-              <div>
-                <strong>FHE Protected Transaction</strong>
-                <p>Credit quantity encrypted for enterprise privacy. Decryption requires on-chain verification.</p>
-              </div>
-            </div>
           </div>
-          
-          {(trade.isVerified || decryptedData.credits !== null) && (
-            <div className="trade-summary">
-              <h3>Trade Summary</h3>
-              <div className="summary-grid">
-                <div className="summary-item">
-                  <span>Total Value:</span>
-                  <strong>${((trade.isVerified ? trade.decryptedValue || 0 : decryptedData.credits || 0) * trade.publicValue2).toLocaleString()}</strong>
-                </div>
-                <div className="summary-item">
-                  <span>Status:</span>
-                  <span className={`status-badge ${trade.isVerified ? 'verified' : 'decrypted'}`}>
-                    {trade.isVerified ? 'On-chain Verified' : 'Locally Decrypted'}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
-        
+
         <div className="modal-footer">
           <button onClick={onClose} className="close-btn">Close</button>
-          {!trade.isVerified && (
-            <button onClick={handleDecrypt} disabled={isDecrypting} className="verify-btn">
-              Verify On-chain
-            </button>
-          )}
         </div>
       </div>
     </div>
